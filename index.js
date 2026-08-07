@@ -7,6 +7,8 @@
   const { Animated } = ReactNative;
 
   let unpatches = [];
+  let originalCreateElement = null;
+  const seenComponents = new Set();
 
   function log(...args) {
     try {
@@ -45,11 +47,7 @@
     );
   };
 
-  // Discord часто переименовывает внутренний модуль, который рендерит
-  // строку сообщения, поэтому вместо одного жёсткого имени перебираем
-  // несколько известных вариантов.
   const NAME_CANDIDATES = ["ChatRow", "RowManager", "MessageContent", "MessageItem", "Message"];
-  // Запасной поиск по набору характерных свойств, если ни одно имя не подошло.
   const PROP_CANDIDATES = [["renderMessage"], ["default", "generate"]];
 
   function resolveRowModule() {
@@ -64,7 +62,6 @@
         log(`ошибка при поиске "${name}"`, e);
       }
     }
-
     for (const props of PROP_CANDIDATES) {
       try {
         const mod = findByProps(...props);
@@ -76,7 +73,6 @@
         log(`ошибка при поиске по свойствам [${props.join(", ")}]`, e);
       }
     }
-
     return null;
   }
 
@@ -90,6 +86,39 @@
     );
   }
 
+  // ДИАГНОСТИКА: перехватываем React.createElement и логируем имя ЛЮБОГО
+  // компонента, который получает проп message с id. Это покажет реальный
+  // компонент строки сообщения в текущей версии Discord, даже если он
+  // называется иначе, чем мы предполагали.
+  function installDiagnostics() {
+    if (originalCreateElement) return;
+    originalCreateElement = React.createElement;
+    React.createElement = function (type, props, ...children) {
+      try {
+        const msg = props && (props.message || props.row?.message || props.item?.message);
+        if (msg && msg.id) {
+          const name =
+            (type && (type.displayName || type.name)) ||
+            (typeof type === "string" ? type : String(type));
+          if (!seenComponents.has(name)) {
+            seenComponents.add(name);
+            log("НАЙДЕН компонент с проп message:", name, "type:", type);
+          }
+        }
+      } catch {}
+      return originalCreateElement.apply(this, [type, props, ...children]);
+    };
+    log("диагностика запущена — откройте любой чат и посмотрите логи");
+  }
+
+  function removeDiagnostics() {
+    if (originalCreateElement) {
+      React.createElement = originalCreateElement;
+      originalCreateElement = null;
+    }
+    seenComponents.clear();
+  }
+
   const plugin = {
     onLoad() {
       unpatches = [];
@@ -97,9 +126,11 @@
 
       if (!rowModule) {
         log(
-          "не удалось найти модуль строки сообщения — ни одно из известных имён не подошло. " +
-            "Анимации работать не будут, пока плагин не обновят под текущую версию Discord."
+          "не удалось найти модуль строки сообщения по известным именам. " +
+            "Включаю диагностику: откройте любой чат и полистайте сообщения — " +
+            "в логах появятся реальные имена компонентов, получающих message."
         );
+        installDiagnostics();
         return;
       }
 
@@ -112,8 +143,6 @@
                 original: returnValue,
                 messageId: message.id,
               });
-            } else {
-              log("сообщение не извлечено из пропсов, анимация пропущена", args?.[0]);
             }
           } catch (e) {
             log("ошибка в колбэке патча", e);
@@ -130,6 +159,7 @@
         if (typeof unpatch === "function") unpatch();
       }
       unpatches = [];
+      removeDiagnostics();
     },
   };
 
