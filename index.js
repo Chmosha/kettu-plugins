@@ -7,7 +7,7 @@
   const { Animated } = ReactNative;
 
   let unpatches = [];
-  let originalCreateElement = null;
+  const restoreFns = [];
   const seenComponents = new Set();
 
   function log(...args) {
@@ -18,7 +18,6 @@
 
   const AnimatedMessage = function ({ original, messageId }) {
     const value = React.useRef(new Animated.Value(0)).current;
-
     React.useEffect(function () {
       value.setValue(0);
       Animated.spring(value, {
@@ -28,21 +27,10 @@
         useNativeDriver: true,
       }).start();
     }, [messageId]);
-
-    const translateY = value.interpolate({
-      inputRange: [0, 1],
-      outputRange: [20, 0],
-    });
-
+    const translateY = value.interpolate({ inputRange: [0, 1], outputRange: [20, 0] });
     return React.createElement(
       Animated.View,
-      {
-        style: {
-          opacity: value,
-          transform: [{ translateY }],
-          width: "100%",
-        },
-      },
+      { style: { opacity: value, transform: [{ translateY }], width: "100%" } },
       original
     );
   };
@@ -78,44 +66,78 @@
 
   function extractMessage(args) {
     const props = (args && args[0]) || {};
-    return (
-      props.message ||
-      props.row?.message ||
-      props.item?.message ||
-      props.rowMessage
-    );
+    return props.message || props.row?.message || props.item?.message || props.rowMessage;
   }
 
-  // ДИАГНОСТИКА: перехватываем React.createElement и логируем имя ЛЮБОГО
-  // компонента, который получает проп message с id. Это покажет реальный
-  // компонент строки сообщения в текущей версии Discord, даже если он
-  // называется иначе, чем мы предполагали.
-  function installDiagnostics() {
-    if (originalCreateElement) return;
-    originalCreateElement = React.createElement;
-    React.createElement = function (type, props, ...children) {
-      try {
-        const msg = props && (props.message || props.row?.message || props.item?.message);
-        if (msg && msg.id) {
-          const name =
-            (type && (type.displayName || type.name)) ||
-            (typeof type === "string" ? type : String(type));
-          if (!seenComponents.has(name)) {
-            seenComponents.add(name);
-            log("НАЙДЕН компонент с проп message:", name, "type:", type);
-          }
+  // Похоже ли props на что-то, содержащее объект сообщения (id + content/timestamp)?
+  function looksLikeMessageProps(props) {
+    if (!props || typeof props !== "object") return null;
+    for (const key of Object.keys(props)) {
+      const val = props[key];
+      if (val && typeof val === "object" && typeof val.id !== "undefined") {
+        if ("content" in val || "timestamp" in val || "author" in val) {
+          return { key, id: val.id };
         }
-      } catch {}
+      }
+    }
+    return null;
+  }
+
+  function reportIfMessage(type, props) {
+    try {
+      const hit = looksLikeMessageProps(props);
+      if (!hit) return;
+      const name =
+        (type && (type.displayName || type.name)) ||
+        (typeof type === "string" ? type : String(type));
+      const tag = `${name}::${hit.key}`;
+      if (!seenComponents.has(tag)) {
+        seenComponents.add(tag);
+        log("НАЙДЕН компонент с проп-объектом сообщения:", name, "| проп:", hit.key, "| type:", type);
+      }
+    } catch {}
+  }
+
+  function installDiagnostics() {
+    // 1. React.createElement (старый JSX-транспайл)
+    const originalCreateElement = React.createElement;
+    React.createElement = function (type, props, ...children) {
+      reportIfMessage(type, props);
       return originalCreateElement.apply(this, [type, props, ...children]);
     };
-    log("диагностика запущена — откройте любой чат и посмотрите логи");
+    restoreFns.push(() => (React.createElement = originalCreateElement));
+
+    // 2. Новый автоматический JSX-рантайм (jsx/jsxs/jsxDEV), если он есть отдельным модулем
+    try {
+      const jsxRuntime = findByProps("jsx", "jsxs");
+      if (jsxRuntime) {
+        for (const fnName of ["jsx", "jsxs", "jsxDEV"]) {
+          if (typeof jsxRuntime[fnName] !== "function") continue;
+          const original = jsxRuntime[fnName];
+          jsxRuntime[fnName] = function (type, props, ...rest) {
+            reportIfMessage(type, props);
+            return original.apply(this, [type, props, ...rest]);
+          };
+          restoreFns.push(() => (jsxRuntime[fnName] = original));
+        }
+        log("jsx-runtime модуль найден и запатчен для диагностики");
+      } else {
+        log("отдельный jsx-runtime модуль не найден (возможно, используется другой механизм рендера)");
+      }
+    } catch (e) {
+      log("ошибка при поиске jsx-runtime", e);
+    }
+
+    log("диагностика запущена — откройте чат, полистайте сообщения и посмотрите логи");
   }
 
   function removeDiagnostics() {
-    if (originalCreateElement) {
-      React.createElement = originalCreateElement;
-      originalCreateElement = null;
+    for (const restore of restoreFns) {
+      try {
+        restore();
+      } catch {}
     }
+    restoreFns.length = 0;
     seenComponents.clear();
   }
 
@@ -127,8 +149,7 @@
       if (!rowModule) {
         log(
           "не удалось найти модуль строки сообщения по известным именам. " +
-            "Включаю диагностику: откройте любой чат и полистайте сообщения — " +
-            "в логах появятся реальные имена компонентов, получающих message."
+            "Включаю расширенную диагностику (React.createElement + jsx-runtime)."
         );
         installDiagnostics();
         return;
