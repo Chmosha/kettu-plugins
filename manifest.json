@@ -1,1 +1,1 @@
-{"name":"MessageAnimations","description":"Анимация плавного появления сообщений","authors":[{"name":"chmosha","id":"123456789012345678"}],"main":"index.js","vendetta":{"icon":"ic_message"},"hash":"bf8f79433be0b19df3520b137c6510647f21eb773bc1c8f6ec3badb8d1190c59"}
+{"name": "MessageAnimations", "description": "Анимация плавного появления сообщений", "authors": [{"name": "chmosha", "id": "123456789012345678"}], "main": "index.js", "vendetta": {"icon": "ic_message"}, "hash": "0a0bb28df97f331aadc0398cb48e96979c0e82f0c29527978b11dd82447ce498"}
