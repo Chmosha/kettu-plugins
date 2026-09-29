@@ -51,51 +51,71 @@ var RichPresence = (function (common, metro, plugin, _vendetta, components, stor
   }
 
   const assetManager = metro.findByProps("getAssetIds");
+  const pluginStartSince = Date.now();
   let realtimeTimer = null;
   let realtimeTimeout = null;
+  function createDefaultSelection() {
+    return {
+      name: "Discord",
+      application_id: "1054951789318909972",
+      flags: 0,
+      type: 0,
+      timestamps: { _enabled: false, _realtime: false, start: pluginStartSince },
+      assets: {},
+      buttons: [{}, {}]
+    };
+  }
   function ensureStorage() {
-    var _a, _b;
-    if (!plugin.storage.selected || typeof plugin.storage.selected !== "string") plugin.storage.selected = "default";
-    if (!plugin.storage.selections?.[plugin.storage.selected]) {
-      plugin.storage.selections = {
-        ...plugin.storage.selections || {},
-        [plugin.storage.selected]: {
-          name: "Discord",
-          application_id: "1054951789318909972",
-          flags: 0,
-          type: 0,
-          timestamps: { _enabled: false, _realtime: false, start: Date.now() },
-          assets: {},
-          buttons: [{}, {}]
-        }
-      };
+    var _a, _b, _c, _d, _e, _f;
+    if (!plugin.storage.selected || typeof plugin.storage.selected !== "string") {
+      plugin.storage.selected = "default";
     }
+    (_a = plugin.storage).selections ?? (_a.selections = {});
+    (_b = plugin.storage.selections)[_c = plugin.storage.selected] ?? (_b[_c] = createDefaultSelection());
     const profile = plugin.storage.selections[plugin.storage.selected];
-    profile.timestamps ?? (profile.timestamps = { _enabled: false, _realtime: false, start: Date.now() });
-    (_a = profile.timestamps)._enabled ?? (_a._enabled = false);
-    (_b = profile.timestamps)._realtime ?? (_b._realtime = false);
+    profile.name ?? (profile.name = "Discord");
+    profile.application_id ?? (profile.application_id = "1054951789318909972");
+    profile.flags ?? (profile.flags = 0);
+    profile.type ?? (profile.type = 0);
+    profile.timestamps ?? (profile.timestamps = { _enabled: false, _realtime: false, start: pluginStartSince });
+    (_d = profile.timestamps)._enabled ?? (_d._enabled = false);
+    (_e = profile.timestamps)._realtime ?? (_e._realtime = false);
+    (_f = profile.timestamps).start ?? (_f.start = pluginStartSince);
     profile.assets ?? (profile.assets = {});
     profile.buttons ?? (profile.buttons = [{}, {}]);
   }
   async function sendRequest(input) {
-    if (input === null) {
-      common.FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", activity: null, pid: 1608, socketId: "RichPresence@Vendetta" });
+    if (!input) {
+      common.FluxDispatcher.dispatch({
+        type: "LOCAL_ACTIVITY_UPDATE",
+        activity: null,
+        pid: 1608,
+        socketId: "RichPresence@Vendetta"
+      });
       return;
     }
-    const realtime = !!input.timestamps?._realtime;
-    const enabled = !!input.timestamps?._enabled;
-    const activity = cloneAndFilter(input);
-    if (enabled) {
-      if (realtime) activity.timestamps.start = Date.now();
-      if (typeof activity.timestamps.end !== "number" || activity.timestamps.end <= 0) delete activity.timestamps.end;
+    const timestampEnabled = !!input.timestamps?._enabled;
+    let activity = cloneAndFilter(input);
+    if (timestampEnabled) {
+      if (typeof activity.timestamps.start !== "number") {
+        activity.timestamps.start = pluginStartSince;
+      }
+      if (typeof activity.timestamps.end !== "number" || activity.timestamps.end <= 0) {
+        delete activity.timestamps.end;
+      }
+      if (!Object.keys(activity.timestamps).length) {
+        delete activity.timestamps;
+      }
     } else {
       delete activity.timestamps;
     }
-    if (activity.assets) {
+    if (activity.assets && assetManager) {
       try {
         const images = [activity.assets.large_image, activity.assets.small_image];
-        let ids = assetManager?.getAssetIds?.(activity.application_id, images) || [];
-        if (!ids.length && assetManager?.fetchAssetIds) ids = await assetManager.fetchAssetIds(activity.application_id, images);
+        let ids = assetManager.getAssetIds?.(activity.application_id, images) || [];
+        if (!ids.length && assetManager.fetchAssetIds) {
+          ids = await assetManager.fetchAssetIds(activity.application_id, images);
+        }
         if (ids[0]) activity.assets.large_image = ids[0];
         if (ids[1]) activity.assets.small_image = ids[1];
       } catch (error) {
@@ -103,13 +123,22 @@ var RichPresence = (function (common, metro, plugin, _vendetta, components, stor
       }
     }
     if (Array.isArray(activity.buttons)) {
-      activity.buttons = activity.buttons.filter((button) => button?.label && button?.url);
+      activity.buttons = activity.buttons.filter((button) => button?.label);
       if (activity.buttons.length) {
-        activity.metadata = { button_urls: activity.buttons.map((button) => button.url) };
+        activity.metadata = {
+          button_urls: activity.buttons.map((button) => button.url)
+        };
         activity.buttons = activity.buttons.map((button) => button.label);
-      } else delete activity.buttons;
+      } else {
+        delete activity.buttons;
+      }
     }
-    common.FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", activity, pid: 1608, socketId: "RichPresence@Vendetta" });
+    common.FluxDispatcher.dispatch({
+      type: "LOCAL_ACTIVITY_UPDATE",
+      activity,
+      pid: 1608,
+      socketId: "RichPresence@Vendetta"
+    });
   }
   function stopRealtimeTimer() {
     if (realtimeTimeout !== null) clearTimeout(realtimeTimeout);
@@ -127,7 +156,9 @@ var RichPresence = (function (common, metro, plugin, _vendetta, components, stor
         stopRealtimeTimer();
         return;
       }
-      sendRequest(latest).catch((error) => _vendetta.logger.error("[Rich Presence] Realtime update failed", error));
+      sendRequest(latest).catch(
+        (error) => _vendetta.logger.error("[Rich Presence] Realtime update failed", error)
+      );
     };
     const delay = 6e4 - Date.now() % 6e4;
     realtimeTimeout = setTimeout(() => {
@@ -138,13 +169,30 @@ var RichPresence = (function (common, metro, plugin, _vendetta, components, stor
   ensureStorage();
   var index = {
     onLoad() {
-      ensureStorage();
-      sendRequest(plugin.storage.selections[plugin.storage.selected]).catch((error) => _vendetta.logger.error("[Rich Presence] Failed to load", error));
-      startRealtimeTimer();
+      try {
+        ensureStorage();
+        const current = plugin.storage.selections?.[plugin.storage.selected];
+        if (!current) {
+          _vendetta.logger.error("[Rich Presence] No active profile");
+          return;
+        }
+        sendRequest(current).catch(
+          (error) => _vendetta.logger.error("[Rich Presence] Failed to load", error)
+        );
+        startRealtimeTimer();
+      } catch (error) {
+        _vendetta.logger.error("[Rich Presence] onLoad failed", error);
+      }
     },
     onUnload() {
       stopRealtimeTimer();
-      sendRequest(null);
+      try {
+        sendRequest(null).catch(
+          (error) => _vendetta.logger.error("[Rich Presence] Failed to clear activity", error)
+        );
+      } catch (error) {
+        _vendetta.logger.error("[Rich Presence] onUnload failed", error);
+      }
     },
     settings: Settings
   };
