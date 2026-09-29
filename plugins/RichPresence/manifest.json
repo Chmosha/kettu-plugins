@@ -1,0 +1,7 @@
+{
+  "name": "Rich Presence - Real Time",
+  "description": "Custom Discord Rich Presence with an optional real-time timestamp based on your device clock.",
+  "authors": [{"name": "Chmosha"}],
+  "main": "src/index.ts",
+  "vendetta": {"icon": "ic_controller_24px"}
+}
