@@ -6,55 +6,78 @@ import Settings from "./Settings";
 import { cloneAndFilter } from "./utils";
 
 const assetManager = findByProps("getAssetIds");
+const pluginStartSince = Date.now();
 let realtimeTimer: ReturnType<typeof setInterval> | null = null;
 let realtimeTimeout: ReturnType<typeof setTimeout> | null = null;
 
+function createDefaultSelection() {
+  return {
+    name: "Discord",
+    application_id: "1054951789318909972",
+    flags: 0,
+    type: 0,
+    timestamps: { _enabled: false, _realtime: false, start: pluginStartSince },
+    assets: {},
+    buttons: [{}, {}],
+  };
+}
+
 function ensureStorage() {
-  if (!storage.selected || typeof storage.selected !== "string") storage.selected = "default";
-  if (!storage.selections?.[storage.selected]) {
-    storage.selections = {
-      ...(storage.selections || {}),
-      [storage.selected]: {
-        name: "Discord",
-        application_id: "1054951789318909972",
-        flags: 0,
-        type: 0,
-        timestamps: { _enabled: false, _realtime: false, start: Date.now() },
-        assets: {},
-        buttons: [{}, {}]
-      }
-    };
+  if (!storage.selected || typeof storage.selected !== "string") {
+    storage.selected = "default";
   }
+
+  storage.selections ??= {};
+  storage.selections[storage.selected] ??= createDefaultSelection();
+
   const profile = storage.selections[storage.selected];
-  profile.timestamps ??= { _enabled: false, _realtime: false, start: Date.now() };
+  profile.name ??= "Discord";
+  profile.application_id ??= "1054951789318909972";
+  profile.flags ??= 0;
+  profile.type ??= 0;
+  profile.timestamps ??= { _enabled: false, _realtime: false, start: pluginStartSince };
   profile.timestamps._enabled ??= false;
   profile.timestamps._realtime ??= false;
+  profile.timestamps.start ??= pluginStartSince;
   profile.assets ??= {};
   profile.buttons ??= [{}, {}];
 }
 
 async function sendRequest(input: any) {
-  if (input === null) {
-    FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", activity: null, pid: 1608, socketId: "RichPresence@Vendetta" });
+  if (!input) {
+    FluxDispatcher.dispatch({
+      type: "LOCAL_ACTIVITY_UPDATE",
+      activity: null,
+      pid: 1608,
+      socketId: "RichPresence@Vendetta",
+    });
     return;
   }
 
-  const realtime = !!input.timestamps?._realtime;
-  const enabled = !!input.timestamps?._enabled;
-  const activity: any = cloneAndFilter(input);
+  const timestampEnabled = !!input.timestamps?._enabled;
+  let activity: any = cloneAndFilter(input);
 
-  if (enabled) {
-    if (realtime) activity.timestamps.start = Date.now();
-    if (typeof activity.timestamps.end !== "number" || activity.timestamps.end <= 0) delete activity.timestamps.end;
+  if (timestampEnabled) {
+    if (typeof activity.timestamps.start !== "number") {
+      activity.timestamps.start = pluginStartSince;
+    }
+    if (typeof activity.timestamps.end !== "number" || activity.timestamps.end <= 0) {
+      delete activity.timestamps.end;
+    }
+    if (!Object.keys(activity.timestamps).length) {
+      delete activity.timestamps;
+    }
   } else {
     delete activity.timestamps;
   }
 
-  if (activity.assets) {
+  if (activity.assets && assetManager) {
     try {
       const images = [activity.assets.large_image, activity.assets.small_image];
-      let ids = assetManager?.getAssetIds?.(activity.application_id, images) || [];
-      if (!ids.length && assetManager?.fetchAssetIds) ids = await assetManager.fetchAssetIds(activity.application_id, images);
+      let ids = assetManager.getAssetIds?.(activity.application_id, images) || [];
+      if (!ids.length && assetManager.fetchAssetIds) {
+        ids = await assetManager.fetchAssetIds(activity.application_id, images);
+      }
       if (ids[0]) activity.assets.large_image = ids[0];
       if (ids[1]) activity.assets.small_image = ids[1];
     } catch (error) {
@@ -63,14 +86,23 @@ async function sendRequest(input: any) {
   }
 
   if (Array.isArray(activity.buttons)) {
-    activity.buttons = activity.buttons.filter((button: any) => button?.label && button?.url);
+    activity.buttons = activity.buttons.filter((button: any) => button?.label);
     if (activity.buttons.length) {
-      activity.metadata = { button_urls: activity.buttons.map((button: any) => button.url) };
+      activity.metadata = {
+        button_urls: activity.buttons.map((button: any) => button.url),
+      };
       activity.buttons = activity.buttons.map((button: any) => button.label);
-    } else delete activity.buttons;
+    } else {
+      delete activity.buttons;
+    }
   }
 
-  FluxDispatcher.dispatch({ type: "LOCAL_ACTIVITY_UPDATE", activity, pid: 1608, socketId: "RichPresence@Vendetta" });
+  FluxDispatcher.dispatch({
+    type: "LOCAL_ACTIVITY_UPDATE",
+    activity,
+    pid: 1608,
+    socketId: "RichPresence@Vendetta",
+  });
 }
 
 function stopRealtimeTimer() {
@@ -82,6 +114,7 @@ function stopRealtimeTimer() {
 
 function startRealtimeTimer() {
   stopRealtimeTimer();
+
   const current = storage.selections?.[storage.selected];
   if (!current?.timestamps?._enabled || !current.timestamps?._realtime) return;
 
@@ -91,7 +124,10 @@ function startRealtimeTimer() {
       stopRealtimeTimer();
       return;
     }
-    sendRequest(latest).catch((error) => logger.error("[Rich Presence] Realtime update failed", error));
+
+    sendRequest(latest).catch((error) =>
+      logger.error("[Rich Presence] Realtime update failed", error)
+    );
   };
 
   const delay = 60000 - (Date.now() % 60000);
@@ -105,13 +141,35 @@ ensureStorage();
 
 export default {
   onLoad() {
-    ensureStorage();
-    sendRequest(storage.selections[storage.selected]).catch((error) => logger.error("[Rich Presence] Failed to load", error));
-    startRealtimeTimer();
+    try {
+      ensureStorage();
+      const current = storage.selections?.[storage.selected];
+
+      if (!current) {
+        logger.error("[Rich Presence] No active profile");
+        return;
+      }
+
+      sendRequest(current).catch((error) =>
+        logger.error("[Rich Presence] Failed to load", error)
+      );
+      startRealtimeTimer();
+    } catch (error) {
+      logger.error("[Rich Presence] onLoad failed", error);
+    }
   },
+
   onUnload() {
     stopRealtimeTimer();
-    sendRequest(null);
+
+    try {
+      sendRequest(null).catch((error) =>
+        logger.error("[Rich Presence] Failed to clear activity", error)
+      );
+    } catch (error) {
+      logger.error("[Rich Presence] onUnload failed", error);
+    }
   },
-  settings: Settings
+
+  settings: Settings,
 };
