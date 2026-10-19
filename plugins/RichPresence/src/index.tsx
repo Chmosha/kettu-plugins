@@ -106,7 +106,7 @@ function startQuest(quest: any) {
     refreshUI();
     showToast("Запущен: " + appName);
 
-    // 1. Логика для видео-квестов (без async/await)
+    // 1. Логика для видео-квестов
     if (taskName.indexOf("WATCH_VIDEO") !== -1) {
         let current = secondsDone;
         activeIntervals[quest.id] = setInterval(() => {
@@ -203,7 +203,7 @@ function startQuest(quest: any) {
     activeIntervals[quest.id] = setInterval(() => sendBeat(false), 20000);
 }
 
-// Настройки через чистый React.createElement (без JSX)
+// Рендер панели настроек через стандартный React.createElement (абсолютно стабильно)
 function SettingsPanel() {
     const h = React.createElement;
     const { ScrollView, View, Text, TouchableOpacity } = ReactNative;
