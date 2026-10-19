@@ -1,7 +1,14 @@
 {
-  "name": "Rich Presence - Real Time",
-  "description": "Rich Presence with an optional real-time device clock timestamp.",
-  "authors": [{"name": "Chmosha"}],
-  "main": "src/index.ts",
-  "vendetta": {"icon": "ic_controller_24px"}
+    "name": "AutoQuest UI",
+    "description": "Панель управления для фонового выполнения квестов Discord без запуска игр.",
+    "authors": [
+        {
+            "name": "CustomDev",
+            "id": "000000000000000000"
+        }
+    ],
+    "main": "index.tsx",
+    "vendetta": {
+        "icon": "ic_badge_staff"
+    }
 }
