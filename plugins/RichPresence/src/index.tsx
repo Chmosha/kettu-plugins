@@ -1,26 +1,35 @@
 import { findByStoreName, findByProps } from "@vendetta/metro";
 import { FluxDispatcher, React, ReactNative } from "@vendetta/metro/common";
 import { showToast } from "@vendetta/ui/toasts";
-import { Forms } from "@vendetta/ui/components";
 import { logger } from "@vendetta";
 
-const { ScrollView, View, Text, TouchableOpacity, StyleSheet } = ReactNative;
-const { FormSection, FormRow, FormDivider } = Forms;
-
-const QuestsStore = findByStoreName("QuestsStore");
-const RunningGameStore = findByStoreName("RunningGameStore");
-const RestAPI = findByProps("get", "post", "put");
-
-// Глобальное состояние для фоновой работы (сохраняется при закрытии меню настроек)
+// Глобальное состояние (сохраняется при закрытии настроек)
 let activeIntervals: Record<string, any> = {};
 let activeQuestId: string | null = null;
 let uiUpdateCallback: (() => void) | null = null;
 
 function notifyUI() {
-    if (uiUpdateCallback) uiUpdateCallback();
+    if (uiUpdateCallback) {
+        try {
+            uiUpdateCallback();
+        } catch {}
+    }
 }
 
-export function stopQuest(questId: string) {
+// Безопасное получение внутренних модулей Discord только в момент вызова
+function getModules() {
+    const QuestsStore = findByStoreName("QuestsStore");
+    const RunningGameStore = findByStoreName("RunningGameStore");
+    const apiModule =
+        findByProps("getAPIBaseURL", "post") ||
+        findByProps("HTTP") ||
+        findByProps("get", "post", "put", "patch", "del");
+    const RestAPI = apiModule?.HTTP ?? apiModule;
+
+    return { QuestsStore, RunningGameStore, RestAPI };
+}
+
+function stopQuest(questId: string) {
     if (activeIntervals[questId]) {
         clearInterval(activeIntervals[questId]);
         delete activeIntervals[questId];
@@ -28,61 +37,77 @@ export function stopQuest(questId: string) {
     if (activeQuestId === questId) {
         activeQuestId = null;
     }
-    if (RunningGameStore) {
-        FluxDispatcher.dispatch({
-            type: "RUNNING_GAMES_CHANGE",
-            removed: [],
-            added: [],
-            games: []
-        });
-    }
+    try {
+        const { RunningGameStore } = getModules();
+        if (RunningGameStore && FluxDispatcher) {
+            FluxDispatcher.dispatch({
+                type: "RUNNING_GAMES_CHANGE",
+                removed: [],
+                added: [],
+                games: []
+            });
+        }
+    } catch {}
     showToast("Выполнение квеста остановлено.");
     notifyUI();
 }
 
-export async function enrollQuest(questId: string) {
+async function enrollQuest(questId: string) {
+    const { RestAPI } = getModules();
+    if (!RestAPI) {
+        showToast("Ошибка: не найден модуль RestAPI.");
+        return;
+    }
     try {
         await RestAPI.post({
             url: `/quests/${questId}/enroll`,
-            body: { location: 11 } // Имитация принятия из настроек
+            body: { location: 11 }
         });
-        showToast("Квест успешно принят!");
+        showToast("Квест принят!");
         notifyUI();
     } catch (e) {
-        logger.error("Ошибка принятия квеста:", e);
-        showToast("Не удалось принять квест (возможно, требуется Desktop-заголовок).");
+        logger.error("Enroll error:", e);
+        showToast("Не удалось принять квест тут. Примите его в меню Discord.");
     }
 }
 
-export async function startQuest(quest: any) {
+async function startQuest(quest: any) {
+    const { RestAPI, RunningGameStore } = getModules();
     if (!RestAPI) {
         showToast("Ошибка: не найден модуль RestAPI.");
         return;
     }
 
-    // Если уже запущен другой квест — останавливаем его
     if (activeQuestId && activeQuestId !== quest.id) {
         stopQuest(activeQuestId);
     }
 
-    const appName = quest.config?.messages?.gameTitle || quest.config?.application?.name || "Квест";
-    const appId = quest.config?.application?.id;
+    const appName =
+        quest.config?.messages?.gameTitle ||
+        quest.config?.messages?.questName ||
+        quest.config?.application?.name ||
+        "Quest";
+    const appId = quest.config?.application?.id || "0";
     const taskConfig = quest.config?.taskConfig ?? quest.config?.taskConfigV2;
-    const taskName = ["WATCH_VIDEO", "PLAY_ON_DESKTOP", "PLAY_ACTIVITY", "STREAM_ON_DESKTOP", "WATCH_VIDEO_ON_MOBILE"].find(
-        (x) => taskConfig?.tasks?.[x] != null
-    );
+    const taskName = [
+        "WATCH_VIDEO",
+        "PLAY_ON_DESKTOP",
+        "PLAY_ACTIVITY",
+        "STREAM_ON_DESKTOP",
+        "WATCH_VIDEO_ON_MOBILE"
+    ].find((x) => taskConfig?.tasks?.[x] != null);
 
     if (!taskName) {
         showToast(`Неизвестный тип задачи для ${appName}`);
         return;
     }
 
-    const secondsNeeded = taskConfig.tasks[taskName].target;
+    const secondsNeeded = taskConfig.tasks[taskName].target ?? 900;
     let secondsDone = quest.userStatus?.progress?.[taskName]?.value ?? 0;
 
     activeQuestId = quest.id;
     notifyUI();
-    showToast(`Запущен квест: ${appName}`);
+    showToast(`Запуск: ${appName}`);
 
     // 1. Логика для видео-квестов
     if (taskName.includes("WATCH_VIDEO")) {
@@ -96,7 +121,7 @@ export async function startQuest(quest: any) {
                 });
                 notifyUI();
             } catch (err) {
-                logger.error("Ошибка видео-прогресса:", err);
+                logger.error("Video progress error:", err);
             }
             await new Promise((r) => setTimeout(r, 1500));
         }
@@ -106,12 +131,13 @@ export async function startQuest(quest: any) {
         return;
     }
 
-    // 2. Логика для игровых квестов (PLAY_ON_DESKTOP / PLAY_ACTIVITY)
+    // 2. Логика для ПК-квестов (PLAY_ON_DESKTOP / PLAY_ACTIVITY)
     const fakePid = Math.floor(Math.random() * 30000) + 1000;
+    const cleanName = String(appName).toLowerCase().replace(/\s+/g, "");
     const fakeGame = {
-        cmdLine: `C:\\Program Files\\${appName}\\${appName}.exe`,
-        exeName: `${appName.toLowerCase().replace(/\s+/g, "")}.exe`,
-        exePath: `c:/program files/${appName.toLowerCase()}/${appName.toLowerCase()}.exe`,
+        cmdLine: `C:\\Program Files\\${appName}\\${cleanName}.exe`,
+        exeName: `${cleanName}.exe`,
+        exePath: `c:/program files/${cleanName}/${cleanName}.exe`,
         hidden: false,
         isLauncher: false,
         id: appId,
@@ -122,14 +148,16 @@ export async function startQuest(quest: any) {
         start: Date.now()
     };
 
-    if (RunningGameStore) {
-        FluxDispatcher.dispatch({
-            type: "RUNNING_GAMES_CHANGE",
-            removed: [],
-            added: [fakeGame],
-            games: [fakeGame]
-        });
-    }
+    try {
+        if (RunningGameStore && FluxDispatcher) {
+            FluxDispatcher.dispatch({
+                type: "RUNNING_GAMES_CHANGE",
+                removed: [],
+                added: [fakeGame],
+                games: [fakeGame]
+            });
+        }
+    } catch {}
 
     const sendHeartbeat = async (isTerminal = false) => {
         try {
@@ -158,12 +186,12 @@ export async function startQuest(quest: any) {
                         terminal: true
                     }
                 });
-                showToast(`🎉 Квест "${appName}" полностью выполнен!`);
+                showToast(`Квест "${appName}" полностью выполнен!`);
                 notifyUI();
             }
         } catch (e) {
-            logger.error("Ошибка Heartbeat:", e);
-            showToast("Ошибка отправки сигнала. Остановка.");
+            logger.error("Heartbeat error:", e);
+            showToast("Ошибка отправки Heartbeat. Остановка.");
             stopQuest(quest.id);
         }
     };
@@ -172,9 +200,10 @@ export async function startQuest(quest: any) {
     activeIntervals[quest.id] = setInterval(() => sendHeartbeat(false), 20000);
 }
 
-// Интерфейс настроек плагина
+// Компонент настроек (рендерится только при открытии шестеренки)
 function SettingsPanel() {
-    const [, forceUpdate] = React.useReducer((x) => x + 1, 0);
+    const { ScrollView, View, Text, TouchableOpacity } = ReactNative;
+    const [, forceUpdate] = React.useReducer((x: number) => x + 1, 0);
 
     React.useEffect(() => {
         uiUpdateCallback = forceUpdate;
@@ -183,123 +212,121 @@ function SettingsPanel() {
         };
     }, []);
 
-    const quests = QuestsStore ? [...QuestsStore.quests.values()] : [];
-    // Фильтруем только актуальные (не истекшие) квесты
-    const validQuests = quests.filter((x: any) => new Date(x.config?.expiresAt).getTime() > Date.now());
+    const { QuestsStore } = getModules();
+    let rawQuests: any[] = [];
+
+    if (QuestsStore?.quests) {
+        if (typeof QuestsStore.quests.values === "function") {
+            rawQuests = Array.from(QuestsStore.quests.values());
+        } else if (Array.isArray(QuestsStore.quests)) {
+            rawQuests = QuestsStore.quests;
+        } else if (typeof QuestsStore.quests === "object") {
+            rawQuests = Object.values(QuestsStore.quests);
+        }
+    }
+
+    const validQuests = rawQuests.filter((x: any) => {
+        const exp = x?.config?.expiresAt ? new Date(x.config.expiresAt).getTime() : Infinity;
+        return exp > Date.now();
+    });
 
     return (
-        <ScrollView style={{ flex: 1, padding: 12 }}>
-            <FormSection title="Управление квестами Discord">
-                {validQuests.length === 0 ? (
-                    <FormRow label="Нет доступных активных квестов в вашем клиенте." />
-                ) : (
-                    validQuests.map((quest: any) => {
-                        const appName = quest.config?.messages?.gameTitle || quest.config?.application?.name || "Неизвестная игра";
-                        const rewardName = quest.config?.rewardsConfig?.rewards?.[0]?.messages?.name || "Награда";
-                        const isEnrolled = Boolean(quest.userStatus?.enrolledAt);
-                        const isCompleted = Boolean(quest.userStatus?.completedAt);
-                        const isRunning = activeQuestId === quest.id;
+        <ScrollView style={{ flex: 1, padding: 14 }}>
+            <Text style={{ color: "#ffffff", fontSize: 18, fontWeight: "bold", marginBottom: 12 }}>
+                Активные квесты Discord ({validQuests.length})
+            </Text>
 
-                        const taskConfig = quest.config?.taskConfig ?? quest.config?.taskConfigV2;
-                        const taskName = ["WATCH_VIDEO", "PLAY_ON_DESKTOP", "PLAY_ACTIVITY", "STREAM_ON_DESKTOP", "WATCH_VIDEO_ON_MOBILE"].find(
-                            (x) => taskConfig?.tasks?.[x] != null
-                        );
-                        const target = taskName ? taskConfig.tasks[taskName].target : 1;
-                        const progress = taskName ? (quest.userStatus?.progress?.[taskName]?.value ?? 0) : 0;
-                        const percent = Math.min(100, Math.floor((progress / target) * 100));
+            {validQuests.length === 0 ? (
+                <View style={{ backgroundColor: "rgba(255,255,255,0.05)", padding: 16, borderRadius: 10 }}>
+                    <Text style={{ color: "#b5bac1", fontSize: 14 }}>
+                        Квесты не найдены или еще не прогрузились. Зайдите в раздел «Настройки → Склад подарков / Quests», чтобы Discord загрузил список, затем вернитесь сюда.
+                    </Text>
+                </View>
+            ) : (
+                validQuests.map((quest: any) => {
+                    const appName =
+                        quest.config?.messages?.gameTitle ||
+                        quest.config?.messages?.questName ||
+                        quest.config?.application?.name ||
+                        "Неизвестная игра";
+                    const isEnrolled = Boolean(quest.userStatus?.enrolledAt);
+                    const isCompleted = Boolean(quest.userStatus?.completedAt);
+                    const isRunning = activeQuestId === quest.id;
 
-                        return (
-                            <View key={quest.id} style={styles.card}>
-                                <Text style={styles.title}>{appName}</Text>
-                                <Text style={styles.subtitle}>🎁 Награда: {rewardName}</Text>
-                                <Text style={styles.subtitle}>
-                                    📊 Статус:{" "}
-                                    {isCompleted
-                                        ? "✅ Выполнен"
-                                        : isEnrolled
-                                        ? `В процессе (${Math.floor(progress)} / ${target} сек. — ${percent}%)`
-                                        : "Не принят"}
-                                </Text>
+                    const taskConfig = quest.config?.taskConfig ?? quest.config?.taskConfigV2;
+                    const taskName = [
+                        "WATCH_VIDEO",
+                        "PLAY_ON_DESKTOP",
+                        "PLAY_ACTIVITY",
+                        "STREAM_ON_DESKTOP",
+                        "WATCH_VIDEO_ON_MOBILE"
+                    ].find((x) => taskConfig?.tasks?.[x] != null);
 
-                                <View style={styles.buttonRow}>
-                                    {!isEnrolled && !isCompleted && (
-                                        <TouchableOpacity
-                                            style={[styles.button, styles.btnEnroll]}
-                                            onPress={() => enrollQuest(quest.id)}
-                                        >
-                                            <Text style={styles.btnText}>Принять квест</Text>
-                                        </TouchableOpacity>
-                                    )}
+                    const target = taskName ? (taskConfig.tasks[taskName].target ?? 1) : 1;
+                    const progress = taskName ? (quest.userStatus?.progress?.[taskName]?.value ?? 0) : 0;
+                    const percent = Math.min(100, Math.floor((progress / target) * 100));
 
-                                    {isEnrolled && !isCompleted && (
-                                        <TouchableOpacity
-                                            style={[styles.button, isRunning ? styles.btnStop : styles.btnStart]}
-                                            onPress={() => (isRunning ? stopQuest(quest.id) : startQuest(quest))}
-                                        >
-                                            <Text style={styles.btnText}>
-                                                {isRunning ? "⏹ Остановить" : "▶️ Запустить выполнение"}
-                                            </Text>
-                                        </TouchableOpacity>
-                                    )}
-                                </View>
-                            </View>
-                        );
-                    })
-                )}
-            </FormSection>
+                    return (
+                        <View
+                            key={String(quest.id)}
+                            style={{
+                                backgroundColor: "rgba(255, 255, 255, 0.06)",
+                                borderRadius: 10,
+                                padding: 14,
+                                marginBottom: 12
+                            }}
+                        >
+                            <Text style={{ color: "#ffffff", fontSize: 16, fontWeight: "bold", marginBottom: 4 }}>
+                                {appName}
+                            </Text>
+                            <Text style={{ color: "#b5bac1", fontSize: 13, marginBottom: 8 }}>
+                                {isCompleted
+                                    ? "✅ Выполнен"
+                                    : isEnrolled
+                                    ? `В процессе: ${Math.floor(progress)} / ${target} сек. (${percent}%)`
+                                    : "Не принят"}
+                            </Text>
+
+                            {!isEnrolled && !isCompleted && (
+                                <TouchableOpacity
+                                    style={{
+                                        backgroundColor: "#4e5058",
+                                        paddingVertical: 10,
+                                        borderRadius: 6,
+                                        alignItems: "center"
+                                    }}
+                                    onPress={() => enrollQuest(quest.id)}
+                                >
+                                    <Text style={{ color: "#ffffff", fontWeight: "bold" }}>Принять квест</Text>
+                                </TouchableOpacity>
+                            )}
+
+                            {isEnrolled && !isCompleted && (
+                                <TouchableOpacity
+                                    style={{
+                                        backgroundColor: isRunning ? "#da373c" : "#5865f2",
+                                        paddingVertical: 10,
+                                        borderRadius: 6,
+                                        alignItems: "center"
+                                    }}
+                                    onPress={() => (isRunning ? stopQuest(quest.id) : startQuest(quest))}
+                                >
+                                    <Text style={{ color: "#ffffff", fontWeight: "bold" }}>
+                                        {isRunning ? "Остановить" : "Запустить выполнение"}
+                                    </Text>
+                                </TouchableOpacity>
+                            )}
+                        </View>
+                    );
+                })
+            )}
         </ScrollView>
     );
 }
 
-const styles = StyleSheet.create({
-    card: {
-        backgroundColor: "rgba(255, 255, 255, 0.05)",
-        borderRadius: 10,
-        padding: 14,
-        marginBottom: 12
-    },
-    title: {
-        color: "#ffffff",
-        fontSize: 16,
-        fontWeight: "bold",
-        marginBottom: 4
-    },
-    subtitle: {
-        color: "#b5bac1",
-        fontSize: 13,
-        marginBottom: 4
-    },
-    buttonRow: {
-        flexDirection: "row",
-        marginTop: 10
-    },
-    button: {
-        paddingVertical: 10,
-        paddingHorizontal: 16,
-        borderRadius: 6,
-        alignItems: "center",
-        justifyContent: "center",
-        flex: 1
-    },
-    btnEnroll: {
-        backgroundColor: "#4e5058"
-    },
-    btnStart: {
-        backgroundColor: "#5865f2"
-    },
-    btnStop: {
-        backgroundColor: "#da373c"
-    },
-    btnText: {
-        color: "#ffffff",
-        fontWeight: "600",
-        fontSize: 14
-    }
-});
-
 export default {
     onLoad: () => {
-        logger.log("AutoQuest UI загружен.");
+        logger.log("AutoQuest UI успешно запущен");
     },
     onUnload: () => {
         Object.keys(activeIntervals).forEach(stopQuest);
